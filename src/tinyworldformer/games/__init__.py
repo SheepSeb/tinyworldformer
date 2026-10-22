@@ -1,6 +1,6 @@
 """The games the world model can dream, and what the pipeline needs to know about each."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import ModuleType
 
 from tinyworldformer.games import breakout, doomlite, flappy, pacman, pong
@@ -24,6 +24,12 @@ class Game:
     # (singleton token, row offset, col offset, token): sprite cells drawn around a placed
     # singleton instead of predicted. Their tokens are background ids that only appear there.
     stamps: tuple[tuple[int, int, int, int], ...] = ()
+    # (groups, H, W) bool: the cells each singleton group can ever occupy in the real game; the
+    # dream never places one elsewhere (a respawn sampled into a wall would stay there). None: anywhere.
+    masks: object = field(default=None, compare=False, repr=False)
+    # (H, W, V) bool: the background tokens each cell can hold in the real game. A slip in a cell
+    # that never changes (a wall) would otherwise be copied for the rest of a dream. None: any.
+    cell_tokens: object = field(default=None, compare=False, repr=False)
 
     @property
     def H(self) -> int:
@@ -95,6 +101,7 @@ GAMES = {
         singletons=((pacman.GHOST_A, pacman.GHOST_B, pacman.EMPTY), (pacman.GHOST_B, pacman.PAC, pacman.EMPTY),
                     (pacman.PAC, pacman.NUM_TOKENS, pacman.EMPTY)),
         lives=pacman.LIVES, done_when_absent=pacman.PELLET, max_steps=pacman.MAX_STEPS, stamps=pacman.STAMPS,
+        masks=pacman.singleton_masks(), cell_tokens=pacman.cell_tokens(),
     ),
     "pong": Game(
         "pong", pong, patch=4, rewards=(-1.0, 0.0, 1.0), random_rewards=(-1.0, 1.0),  # every point is followed by a serve

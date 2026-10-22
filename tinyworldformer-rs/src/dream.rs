@@ -9,7 +9,7 @@
 //! from the exported `weights.rs` of the env this build picked (`build.rs`).
 
 use crate::model::{argmax, Engine};
-use crate::weights::{BG, COLORS, DONE_WHEN_ABSENT, H, INIT_GRIDS, LIVES, N_INIT, REWARD_VALUES, SINGLETONS, STAMPS, V, W};
+use crate::weights::{BG, CELL_TOKENS, COLORS, DONE_WHEN_ABSENT, H, INIT_GRIDS, LIVES, N_INIT, REWARD_VALUES, SINGLETONS, SINGLETON_MASK, STAMPS, V, W};
 
 /// Candidates whose logit is within this of the best are sampled (exp(-2.2) ~ 0.1).
 pub const WINDOW: f32 = 2.2;
@@ -61,16 +61,17 @@ impl Dream {
         for r in 0..H {
             for c in 0..W {
                 let logits = &engine.cell_logits(r, c)[..BG];
-                let best = (0..BG).filter(|&t| !stamped(t)).fold(None, |b: Option<usize>, t| match b {
+                let allowed = CELL_TOKENS[r * W + c]; // the background tokens this cell can hold
+                let best = (0..BG).filter(|&t| !stamped(t) && allowed >> t & 1 == 1).fold(None, |b: Option<usize>, t| match b {
                     Some(b) if logits[b] >= logits[t] => Some(b), // first maximum, like argmax
                     _ => Some(t),
                 });
                 self.grid[r * W + c] = best.unwrap_or(0) as u8;
             }
         }
-        let mut placed = [(0usize, 0u8); SINGLETONS.len()];
+        let mut placed = [(usize::MAX, 0u8); SINGLETONS.len()];
         for (k, &(lo, hi, _)) in SINGLETONS.iter().enumerate() {
-            let (i, tok) = self.sample(engine, lo as usize, hi as usize);
+            let (i, tok) = self.sample(engine, k, lo as usize, hi as usize, &placed[..k]);
             self.grid[i] = tok as u8;
             placed[k] = (i, tok as u8);
         }
@@ -92,9 +93,14 @@ impl Dream {
         (reward, self.lives == 0 || gone || self.steps >= max_steps)
     }
 
-    /// (cell, token) for one singleton group: a sample among the near-best logits of tokens lo..hi.
-    fn sample(&mut self, engine: &Engine, lo: usize, hi: usize) -> (usize, usize) {
-        let logits = |i: usize| &engine.cell_logits(i / W, i % W)[lo..hi];
+    /// (cell, token) for singleton group `group`: a sample among the near-best logits of tokens
+    /// lo..hi, over the cells where the real game can have that group (`SINGLETON_MASK`).
+    /// Cells already holding an earlier group (`taken`) are skipped: one object per cell.
+    fn sample(&mut self, engine: &Engine, group: usize, lo: usize, hi: usize, taken: &[(usize, u8)]) -> (usize, usize) {
+        const NONE: &[f32] = &[f32::NEG_INFINITY; 32];
+        let mask = &SINGLETON_MASK[group * H * W..(group + 1) * H * W];
+        let free = |i: usize| mask[i] != 0 && !taken.iter().any(|p| p.0 == i);
+        let logits = |i: usize| if free(i) { &engine.cell_logits(i / W, i % W)[lo..hi] } else { &NONE[..hi - lo] };
         let best = (0..H * W).flat_map(|i| logits(i).iter().copied()).fold(f32::NEG_INFINITY, f32::max);
         let weight = |l: f32| if l >= best - WINDOW { libm::expf(l - best) } else { 0.0 };
         let total: f32 = (0..H * W).map(|i| logits(i).iter().map(|&l| weight(l)).sum::<f32>()).sum();

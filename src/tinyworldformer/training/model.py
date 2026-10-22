@@ -78,24 +78,35 @@ class WorldModel(nn.Module):
 def decode(cells: torch.Tensor, g: Game, generator: torch.Generator | None = None, window: float = 2.2) -> torch.Tensor:
     """Cell logits (B, T, SUB, V) -> next grid (B, H, W) uint8.
 
-    Every cell takes its argmax among the background tokens (stamped tokens excluded). Then each
+    Every cell takes its argmax among the background tokens it can hold (`Game.cell_tokens`;
+    stamped tokens excluded). Then each
     singleton group (Breakout's ball, Doom-lite's minimap enemy and player, Pac-Man and the ghosts)
     is placed exactly once: the argmax over all
     (cell, token) pairs, or with `generator` a sample among the pairs whose logit is within
-    `window` of the best (that is how random events, the serve or the respawn, are dreamed). Last,
-    the game's stamps draw the rest of each placed sprite around it.
+    `window` of the best (that is how random events, the serve or the respawn, are dreamed), and
+    only on the cells where the real game can have it (`Game.masks`). Last, the game's stamps draw
+    the rest of each placed sprite around it.
     """
     c = unpatchify(cells, g)  # (B, H, W, V)
     B = c.shape[0]
     bg = c[..., : g.BG]
-    if g.stamps:  # stamped tokens are drawn around their singleton, never predicted
+    if g.stamps or g.cell_tokens is not None:
         bg = bg.clone()
+    if g.stamps:  # stamped tokens are drawn around their singleton, never predicted
         bg[..., g.STAMPED] = float("-inf")
+    if g.cell_tokens is not None:  # each cell only takes a token it can hold in the real game
+        allowed = torch.as_tensor(g.cell_tokens[..., : g.BG], device=c.device)[None]
+        bg = torch.where(allowed, bg, torch.full_like(bg, float("-inf")))
     grid = bg.argmax(-1).to(torch.uint8).view(B, -1)
     rows = torch.arange(B, device=grid.device)
     placed = []
-    for lo, hi, _ in g.singletons:
-        logits = c[..., lo:hi].reshape(B, -1)
+    taken = torch.zeros(B, g.H * g.W, dtype=torch.bool, device=c.device)  # one object per cell
+    for k, (lo, hi, _) in enumerate(g.singletons):
+        logits = c[..., lo:hi].reshape(B, g.H * g.W, hi - lo)
+        allowed = ~taken[..., None]
+        if g.masks is not None:  # only where the real game can ever put this object
+            allowed = allowed & torch.as_tensor(g.masks[k], device=c.device).reshape(1, -1, 1)
+        logits = torch.where(allowed, logits, torch.full_like(logits, float("-inf"))).reshape(B, -1)
         if generator is None:
             idx = logits.argmax(-1)
         else:
@@ -104,12 +115,12 @@ def decode(cells: torch.Tensor, g: Game, generator: torch.Generator | None = Non
             idx = torch.multinomial(p, 1, generator=generator)[:, 0]
         cell, tok = idx // (hi - lo), lo + idx % (hi - lo)
         grid[rows, cell] = tok.to(torch.uint8)
+        taken[rows, cell] = True
         placed.append((cell, tok))
-    taken = torch.stack([cell for cell, _ in placed], 1) if placed else None
     for anchor, dr, dc, tok in g.stamps:  # never over another singleton
         for cell, t in placed:
             r, col = cell // g.W + dr, cell % g.W + dc
             ok = (t == anchor) & (r >= 0) & (r < g.H) & (col >= 0) & (col < g.W)
-            ok &= ~(taken == (r * g.W + col)[:, None]).any(1)
+            ok &= ~taken[rows, (r * g.W + col).clamp(0, g.H * g.W - 1)]
             grid[rows[ok], (r * g.W + col)[ok]] = tok
     return grid.view(B, g.H, g.W)

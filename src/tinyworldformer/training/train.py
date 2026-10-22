@@ -34,8 +34,15 @@ def to_device(paths: list[Path], device: str, max_gpu_bytes: float = 4e9) -> tup
 def focus(grid: torch.Tensor, g: Game) -> tuple[torch.Tensor, torch.Tensor]:
     """Where things can happen, judged from the *input* frame only (so the weights do not bias
     the predicted probabilities). Breakout: cells within 2 of the ball plus the paddle rows, and
-    whether the ball is close enough to the bricks or the bottom for a reward event. Other games
-    weight everything equally."""
+    whether the ball is close enough to the bricks or the bottom for a reward event. Pac-Man:
+    the pellets (each is one cell of 2,304, and a dropped one never comes back) and the cells
+    within 3 of Pac-Man and the ghosts. Other games weight everything equally."""
+    if g.name == "pacman":
+        from tinyworldformer.games import pacman as pm
+
+        sprites = (grid >= pm.GHOST_A).float()[:, None]
+        near = (F.max_pool2d(sprites, 7, stride=1, padding=3)[:, 0] > 0) | (grid == pm.PELLET)
+        return patchify(near, g), torch.ones(grid.shape[0], device=grid.device, dtype=torch.bool)
     if g.name != "breakout":
         ones = torch.ones(grid.shape[0], device=grid.device, dtype=torch.bool)
         return torch.ones_like(patchify(grid, g), dtype=torch.bool), ones

@@ -81,6 +81,31 @@ def _stamps() -> tuple[tuple[int, int, int, int], ...]:
 
 
 STAMPS = _stamps()
+
+
+def cell_tokens() -> np.ndarray:
+    """(H, W, NUM_TOKENS) bool: the background tokens each cell can hold in the real game. Walls
+    are always walls, a path cell is path or (on its dot) a pellet, HUD cells hold their icons.
+    Sprites come from the singletons and stamps, so they are not listed here."""
+    allowed = np.zeros((H, W, NUM_TOKENS), bool)
+    allowed[np.arange(H)[:, None], np.arange(W)[None, :], BACKGROUND] = True
+    for x, y in FREE:
+        allowed[S * y, S * x, PELLET] = True
+    for c in LIFE_COLS:
+        allowed[HUD_ROW : HUD_ROW + S, c : c + S, LIFE] = True
+    allowed[HUD_ROW : HUD_ROW + S, LIGHT_COL : LIGHT_COL + S, [LIGHT_A, LIGHT_B]] = True
+    allowed[HUD_ROW : HUD_ROW + S, LIGHT_COL : LIGHT_COL + S, HUD] = False
+    return allowed
+
+
+def singleton_masks() -> np.ndarray:
+    """(3, H, W) bool: where ghost A, ghost B and Pac-Man's state cell can ever be. Ghosts sit on
+    the lower-left token of a free cell; Pac-Man's mouth on any token of a free cell."""
+    masks = np.zeros((3, H, W), bool)
+    for x, y in FREE:
+        masks[0, S * y + 1, S * x] = masks[1, S * y + 1, S * x] = True
+        masks[2, S * y : S * y + S, S * x : S * x + S] = True
+    return masks
 HUD_ROW = 2 * MAP_H + 1  # top row of the 2x2 HUD icons
 LIFE_COLS = [1 + 3 * i for i in range(LIVES)]
 LIGHT_COL = 2 * MAP_W - 3

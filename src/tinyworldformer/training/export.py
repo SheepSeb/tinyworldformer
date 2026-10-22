@@ -64,6 +64,13 @@ def agreement(model: WorldModel, m: intref.IntModel, d: dict, loops: int, n: int
 HUMAN_FRAME_MS = {"breakout": 66, "doomlite": 150, "flappy": 100, "pacman": 150, "pong": 66}  # how fast a dreamed frame ticks while a person plays
 
 
+def cell_bits(g: Game) -> np.ndarray:
+    """`Game.cell_tokens` as one u32 bit set per cell over the background tokens (all set: any)."""
+    assert g.BG <= 32
+    allowed = g.cell_tokens[..., : g.BG] if g.cell_tokens is not None else np.ones((g.H, g.W, g.BG), bool)
+    return (allowed.astype(np.uint64) << np.arange(g.BG, dtype=np.uint64)).sum(-1).astype(np.uint32)
+
+
 def write_rust(m: intref.IntModel, g: Game, path: Path) -> None:
     rng = np.random.default_rng(0)
     inits = np.unique(np.stack([g.module.reset(rng).grid for _ in range(16)]), axis=0)
@@ -81,6 +88,10 @@ def write_rust(m: intref.IntModel, g: Game, path: Path) -> None:
         f"pub static SINGLETONS: [(u8, u8, u8); {len(g.singletons)}] = [{', '.join(map(str, g.singletons))}];\n",
         "/// (singleton token, row offset, col offset, token): sprite cells drawn around a placed singleton\n",
         f"pub static STAMPS: [(u8, i8, i8, u8); {len(g.stamps)}] = [{', '.join(map(str, g.stamps))}];\n",
+        "/// per cell, bit t set if background token t is allowed there\n",
+        rust_array("CELL_TOKENS", cell_bits(g), "u32"),
+        "/// 1 where each singleton group can ever be in the real game, per group then row-major cell\n",
+        rust_array("SINGLETON_MASK", g.masks if g.masks is not None else np.ones((len(g.singletons), g.H, g.W), bool), "u8"),
         rust_array("REWARD_VALUES", np.array(g.rewards), "f32"),
         rust_array("INIT_GRIDS", inits, "u8"),
         "/// RGB of token t on row r at [(r * V + t) * 3..]\n",
