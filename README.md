@@ -1,17 +1,36 @@
 <p align="center"><img src="docs/media/banner.png" alt="tinyworldformer: games dreamed by a tiny int8 transformer on a Raspberry Pi Pico 2 W"></p>
 
-Five small games simulated by an int8 transformer small enough for a Raspberry Pi Pico 2 W. The network takes the current frame and a button press, and predicts the next frame and the reward. Agents trained with stream-x play inside these simulations (the "dreams"); some never saw the real game.
+Two small neural networks share one Raspberry Pi Pico 2 W. One dreams a game: it takes the current frame and a button press, and predicts the next frame and the reward. The other plays that game: it looks at each dreamed frame and picks the button. There is no game code on the chip; five games (Breakout, Doom-lite, Flappy Bird, Pac-Man lite, Pong) exist only inside the first network.
 
 ![five dreams](docs/media/hero.gif)
 
-Every frame above is drawn by a world model, not by game code. An agent picks the buttons.
+Every frame above is drawn by the dream network, not by game code. The actor network picks the buttons.
 
+- [The dream and the actor](#the-dream-and-the-actor)
 - [The games](#the-games)
 - [How the world model works](#how-the-world-model-works): tokens, the loop, decoding, checking the dream, training
 - [The agents: stream-x](#the-agents-stream-x)
 - [Quantization and the Pico](#quantization-and-the-pico)
+- [On the chip](#on-the-chip)
 - [Flashing a game and an agent](#flashing-a-game-and-an-agent)
 - [Reproduce](#reproduce) and [code layout](#code-layout)
+
+## The dream and the actor
+
+![the dream and the actor](docs/media/explain_twonetworks.gif)
+
+| | network 1: the dream | network 2: the actor |
+|---|---|---|
+| job | frame + button → next frame + reward | frame → button |
+| architecture | looped transformer, int8 | MLP with two hidden layers, float32 |
+| size | 26k–131k parameters | 9k–16k parameters |
+| cost per frame | 2–4M multiply-adds | 9k–16k multiply-adds |
+| trained | on recorded real games ([how](#how-the-world-model-works)) | with stream-x, in the real game or inside the dream ([how](#the-agents-stream-x)) |
+
+- **A closed loop.** On the chip neither network sees the real game. The actor only sees frames the dream drew, and the dream only sees buttons the actor pressed.
+- **One core.** Both run on core 1 of the RP2350, one after the other, every frame. Core 0 handles USB and the display.
+- **Learning on the chip.** A third network can replace the pretrained actor: a fresh stream-x agent that learns from scratch while it plays inside the dream, on the board.
+- **Your turn.** Any button press hands control from the actor to you, so you play the dream yourself.
 
 ## The games
 
@@ -201,7 +220,7 @@ Without shaping, Doom-lite agents camp in the start corner and fire: the enemy a
 | Pac-Man | PACMAN_SIZES |
 
 - **Measuring:** flash and RAM are measured from the firmware ELF (`size -A`), built with the Display Pack driver. They include the code, USB, the display driver and the on-device learner.
-- **The Pico 2 W:** 4 MB of flash and 520 KB of SRAM.
+- **The Pico 2 W:** 4 MB of flash and 520 KB of SRAM (512 KiB of it in the main memory map).
 - **Room to shrink:** the float32 embedding tables are the largest part. They could be int8 too.
 
 **Reusing the export.** `src/tinyworldformer/rustexport/` imports only numpy and torch, and a test keeps it that way, so other projects can use it:
@@ -211,10 +230,46 @@ Without shaping, Doom-lite agents camp in the start corner and fire: the enemy a
 3. `rustexport.convert.looped_model` turns it into the integer spec.
 4. `int_model_arrays` and `mlp_arrays` with `codegen.write_module` write the Rust source; `rustexport.Golden` writes the vectors a Rust test checks.
 
-**The firmware** (`tinyworldformer-rs/firmware`, embassy):
-- **Cores:** core 1 runs the world model and the agent; core 0 streams ANSI frames over USB serial and drives the optional Pimoroni Display Pack.
-- **Learning at boot:** the board starts with a fresh agent learning on the device. Press `l` (USB) or hold B for 1 s (Display Pack) to switch to the pretrained agent, and again to switch back.
-- **Not run on hardware yet:** the firmware is built and sized but untested on a board, so its frame rate is unmeasured.
+## On the chip
+
+The firmware (`tinyworldformer-rs/firmware`) is `no_std` Rust on embassy. Nothing is allocated at run time: the weights are `static` arrays in flash, and every buffer is a fixed-size `static` in RAM.
+
+**Core 1 runs the game.** One pass of its loop (`dream_loop` in `firmware/src/main.rs`) is one frame:
+
+1. **The actor picks a button.** It reads features off the current frame (`agent::observe`) and runs its MLP. If on-device learning is on, the learning agent picks instead. If you are pressing buttons, your press is used.
+2. **The dream draws the next frame.** The int8 transformer runs 2 loops over the frame and the button (`Engine::forward`). Decoding turns its scores into the next frame: background argmax per cell, each singleton placed once (sampled for random events, with an xorshift RNG), then the sprite stamps. The reward is the argmax of the reward head, and lives and episode ends are counters on top.
+3. **The learner updates** (if learning is on), from this one transition, then forgets it.
+4. **The frame goes to core 0** through a two-slot channel. If core 0 is still busy with the previous frame, this one is dropped: core 1 never waits for the screen.
+
+When you play, core 1 also slows to a playable speed (66–150 ms per frame, depending on the game). The agent runs as fast as the chip allows.
+
+**Core 0 talks to the outside world** (embassy async tasks):
+- **USB serial:** each frame goes out as coloured ANSI text with a status line (model time, actor time, fps, env and agent names). Keys come back in.
+- **Display Pack** (optional, `--features display`): a 320×240 ST7789 over SPI at up to 62.5 MHz. Only cells that changed since the last frame are redrawn.
+- **Buttons:** polled every 20 ms.
+
+The cores share only the frame channel and a few atomics: who is playing, the pressed key, learning on/off, the loop count.
+
+**Where the memory goes:**
+
+| | in flash | in RAM |
+|---|---|---|
+| world model | int8 matrices, float32 embeddings, norms and scales, the game's opening frames and colours (52–138 KB) | scratch buffers for one forward pass: activations for 36–80 tokens, the int8 copies the matmuls read, and the per-cell scores of the next frame (114 KB for Flappy Bird up to 368 KB for Pac-Man, whose per-cell scores alone take 184 KB) |
+| actor | float32 MLP weights and feature normalization (51–61 KB) | its features and hidden layers (about 1 KB) |
+| on-device learner | code only | weights, eligibility traces and normalization for two 32-unit networks (about 85 KB) |
+| firmware | code, USB, display driver (about 150 KB) | stacks (16 KB for core 1), USB buffers, frame channels |
+
+The memory map gives 4 MB of flash and 512 KiB of RAM. Every game fits: Breakout uses 361 KB of flash and 299 KB of RAM; Pac-Man, the largest, 600 KB and 460 KB.
+
+**The inner loop.** Most of the time goes into int8 dot products (`dot_i8` in `src/lib.rs`):
+- **Loads:** one 32-bit load fetches 4 weights.
+- **Unpacking:** `SXTB16` unpacks bytes 0/2 and 1/3 into 16-bit halves.
+- **Multiply-adds:** `SMLAD` does two multiply-adds in one instruction.
+- **Attention:** its uint8 probabilities times int8 values use `UXTB16` instead of `SXTB16`.
+- **Float work:** norms, the exp table lookup and the final scale per output stay in float32 on the FPU.
+- **Speed:** a frame at 2 loops is 2–4M multiply-adds. On a desktop CPU the same Rust code dreams a frame in 0.7 ms (Flappy Bird) to 1.5 ms (Breakout). **On the Pico the frame rate is not measured yet:** the firmware is built and sized but has not run on a board.
+
+**Learning at boot.** The board starts with a fresh agent learning on the device. Press `l` over USB, or hold B for 1 s on the Display Pack, to switch to the pretrained actor, and again to switch back.
 
 ## Flashing a game and an agent
 

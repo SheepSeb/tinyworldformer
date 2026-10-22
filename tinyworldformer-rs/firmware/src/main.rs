@@ -95,7 +95,7 @@ static RESET_LEARNER: AtomicBool = AtomicBool::new(false);
 static LOOPS_SET: AtomicU8 = AtomicU8::new(if LOOPS < 2 { LOOPS as u8 } else { 2 }); // 2 loops: best speed/quality trade-off
 
 static mut CORE1_STACK: Stack<16384> = Stack::new();
-// ~130 KB of activations; a const-initialised static so it never touches a stack.
+// 114-368 KB of activations depending on the game; a const-initialised static so it never touches a stack.
 static mut ENGINE: Engine = Engine::new();
 // ~85 KB of weights and eligibility traces for the on-device learner.
 static mut LEARNER: Learner = Learner::zeroed(1);
@@ -218,7 +218,7 @@ async fn usb_main(spawner: Spawner, usb: embassy_rp::Peri<'static, USB>) {
     let driver = Driver::new(usb, Irqs);
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe); // test VID/PID, fine for a hobby device
     config.manufacturer = Some("tinyworldformer");
-    config.product = Some("dreamed breakout");
+    config.product = Some("dreamed games");
     config.serial_number = Some("0001");
     config.max_power = 100;
     config.max_packet_size_0 = 64;

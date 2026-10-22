@@ -58,7 +58,7 @@ fn rmsnorm(x: &[f32], g: &[f32], out: &mut [f32]) {
     }
 }
 
-/// Scratch buffers for one forward pass (~130 KB). Put it in a `static` on the device.
+/// Scratch buffers for one forward pass (114-368 KB, depending on the game). Put it in a `static` on the device.
 pub struct Engine {
     inp: [f32; T * D],
     x: [f32; T * D],
