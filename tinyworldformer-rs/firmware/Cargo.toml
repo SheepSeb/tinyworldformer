@@ -1,0 +1,30 @@
+[package]
+name = "tinyworldformer-firmware"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tinyworldformer-rs = { path = "..", default-features = false }
+embassy-rp = { version = "0.10.0", features = ["rp235xa", "time-driver", "critical-section-impl", "binary-info", "executor-thread"] }
+embassy-executor = "0.10.0"
+embassy-time = "0.5.1"
+embassy-sync = "0.8.0"
+embassy-usb = "0.6.0"
+embassy-futures = "0.1.2"
+cortex-m = { version = "0.7.6", features = ["inline-asm"] }
+cortex-m-rt = "0.7.0"
+panic-halt = "1.0"
+static_cell = "2.1"
+mipidsi = { version = "0.10.0", optional = true }
+embedded-graphics = { version = "0.8.2", optional = true }
+embedded-hal-bus = { version = "0.3.0", optional = true }
+
+[profile.release]
+debug = true
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[features]
+# Pimoroni Pico Display Pack 2.0/2.8: draw on the LCD, play with its buttons
+display = ["dep:mipidsi", "dep:embedded-graphics", "dep:embedded-hal-bus"]
