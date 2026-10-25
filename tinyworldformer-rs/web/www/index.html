@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tinyworldformer</title>
+<style>
+  :root { --bg: #f6f5f2; --fg: #1d1d1f; --muted: #6b6b70; --line: #d9d8d3; --btn: #ffffff; --accent: #c2410c; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111113; --fg: #ececee; --muted: #9a9aa2; --line: #2c2c31; --btn: #1c1c20; --accent: #fb923c; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 ui-sans-serif, system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 18px; color: var(--muted); }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  select, button { font: inherit; color: var(--fg); background: var(--btn); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  canvas { display: block; width: 100%; max-width: 560px; margin: 0 auto; image-rendering: pixelated; border-radius: 6px; background: #000; touch-action: none; }
+  .stats { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 12px 0; white-space: pre-wrap; min-height: 3em; }
+  .keys { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 12px 0; }
+  .keys button { min-width: 64px; padding: 10px 14px; }
+  .help { color: var(--muted); font-size: 13px; }
+  kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>tinyworldformer</h1>
+  <p class="sub">There is no game code here. Every frame is dreamed by the int8 looped transformer that runs on the Pico 2 W, compiled to WebAssembly. Press any game key to take over from the agent.</p>
+  <div class="bar">
+    <select id="env" aria-label="game"></select>
+    <button id="agent" title="g">agent plays</button>
+    <button id="learn" title="l" aria-pressed="false">learn on the fly</button>
+    <button id="relearn" title="r">learn from scratch</button>
+    <select id="loops" aria-label="loops" title="1-4"></select>
+    <button id="fast" title="f" aria-pressed="false">fast</button>
+  </div>
+  <canvas id="screen"></canvas>
+  <div class="stats" id="stats">loading…</div>
+  <div class="keys" id="pad"></div>
+  <p class="help" id="help"></p>
+</main>
+<script>
+// Per game: the keys the firmware reads (see web/src/lib.rs `key`) and what they do.
+const KEYS = {
+  breakout: [['a', '◀ left'], ['s', 'stop'], ['d', 'right ▶']],
+  doomlite: [['a', '↺ turn'], ['w', '▲ forward'], ['d', 'turn ↻'], [' ', 'fire'], ['s', 'wait']],
+  flappy:   [[' ', 'flap']],
+  pacman:   [['a', '◀'], ['w', '▲'], ['s', '▼'], ['d', '▶'], [' ', 'keep going']],
+  pong:     [['w', '▲ up'], [' ', 'stop'], ['s', '▼ down']],
+};
+const WON = { breakout: 'bricks', doomlite: 'kills', flappy: 'pipes', pacman: 'pellets', pong: 'points' };
+const ARROWS = { ArrowUp: 'w', ArrowLeft: 'a', ArrowDown: 's', ArrowRight: 'd' };
+
+const $ = id => document.getElementById(id);
+const screen = $('screen'), ctx = screen.getContext('2d');
+let wasm = null, game = '', fast = false, lastStep = 0, modelMs = 0, generation = 0;
+
+async function load(env) {
+  const gen = ++generation;
+  const { instance } = await WebAssembly.instantiateStreaming(fetch(`${env}.wasm`), {})
+    .catch(async () => WebAssembly.instantiate(await (await fetch(`${env}.wasm`)).arrayBuffer(), {})); // host without application/wasm
+  if (gen !== generation) return; // a newer pick won
+  const e = instance.exports;
+  e.init((Math.random() * 2 ** 32) >>> 0);
+  const str = i => new TextDecoder().decode(new Uint8Array(e.memory.buffer, e.name_ptr(i), e.name_len(i)));
+  wasm = e;
+  game = str(0);
+  screen.width = e.width();
+  screen.height = e.height();
+  screen.style.width = `min(100%, 560px, ${(70 * e.width() / e.height()).toFixed(1)}vh)`; // tall games fit the screen
+  $('loops').innerHTML = Array.from({ length: e.max_loops() }, (_, i) => `<option value="${i + 1}">${i + 1} loop${i ? 's' : ''}</option>`).join('');
+  $('pad').innerHTML = '';
+  for (const [k, label] of KEYS[game] ?? []) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.addEventListener('pointerdown', ev => { ev.preventDefault(); press(k); });
+    $('pad').append(b);
+  }
+  $('help').innerHTML = `env <b>${str(1)}</b>, pretrained agent <b>${str(2)}</b>. Keys: `
+    + (KEYS[game] ?? []).map(([k, l]) => `<kbd>${k === ' ' ? 'space' : k}</kbd> ${l}`).join(', ')
+    + ` (arrows work too); <kbd>g</kbd> agent, <kbd>l</kbd> learning, <kbd>r</kbd> learn from scratch, <kbd>1</kbd>-<kbd>${e.max_loops()}</kbd> loops, <kbd>f</kbd> fast.`;
+  draw();
+}
+
+function press(k) {
+  if (!wasm) return;
+  if (k === 'f') { fast = !fast; return; }
+  wasm.key(k.charCodeAt(0));
+}
+
+function draw() {
+  const px = new Uint8ClampedArray(wasm.memory.buffer, wasm.rgba(), wasm.width() * wasm.height() * 4);
+  ctx.putImageData(new ImageData(px, wasm.width(), wasm.height()), 0, 0);
+  const who = wasm.human() ? 'you' : wasm.learning() ? 'stream-x LEARNING' : 'pretrained stream-x agent';
+  $('stats').textContent =
+    `score ${wasm.score()}  ${WON[game] ?? 'wins'} ${wasm.wins()}  lives ${wasm.lives()}  episode ${wasm.episode()}  | ${who}\n` +
+    `${wasm.loops()} loops: ${modelMs.toFixed(2)} ms per dreamed frame${fast ? ' (fast)' : ''}\n` +
+    (wasm.learning() || wasm.learn_steps() ? `learned for ${wasm.learn_steps()} steps, mean score of the last 10 episodes ${wasm.avg10()}` : '');
+  $('agent').setAttribute('aria-pressed', String(!wasm.human()));
+  $('learn').setAttribute('aria-pressed', String(!!wasm.learning()));
+  $('fast').setAttribute('aria-pressed', String(fast));
+  $('loops').value = wasm.loops();
+}
+
+// Human speed: one dreamed frame every HUMAN_FRAME_MS. Fast (not while you play): as many as fit in ~12 ms.
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (!wasm) return;
+  const turbo = fast && !wasm.human();
+  if (!turbo && now - lastStep < wasm.human_frame_ms()) return;
+  lastStep = now;
+  const t0 = performance.now();
+  let n = 0;
+  do { wasm.tick(); n++; } while (turbo && performance.now() - t0 < 12);
+  modelMs = (performance.now() - t0) / n;
+  draw();
+}
+
+addEventListener('keydown', ev => {
+  if (ev.target.tagName === 'SELECT' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const k = ARROWS[ev.key] ?? ev.key.toLowerCase();
+  if (k.length !== 1) return;
+  ev.preventDefault();
+  press(k);
+});
+screen.addEventListener('pointerdown', () => window.focus()); // keys reach the page inside the Space's iframe
+$('agent').onclick = () => press('g');
+$('learn').onclick = () => press('l');
+$('relearn').onclick = () => press('r');
+$('fast').onclick = () => press('f');
+$('loops').onchange = ev => { press(ev.target.value); ev.target.blur(); };
+$('env').onchange = ev => { load(ev.target.value); ev.target.blur(); };
+
+fetch('envs.json').then(r => r.json()).then(envs => {
+  const pick = new URLSearchParams(location.search).get('env');
+  $('env').innerHTML = envs.map(e => `<option>${e}</option>`).join('');
+  $('env').value = envs.includes(pick) ? pick : envs.includes('breakout') ? 'breakout' : envs[0];
+  load($('env').value);
+}).catch(err => { $('stats').textContent = `could not load the models (${err}); run ./build.sh and serve www/ over http`; });
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

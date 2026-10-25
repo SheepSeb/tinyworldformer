@@ -13,6 +13,7 @@ Every frame above is drawn by the dream network, not by game code. The actor net
 - [Quantization and the Pico](#quantization-and-the-pico)
 - [On the chip](#on-the-chip)
 - [Flashing a game and an agent](#flashing-a-game-and-an-agent)
+- [In the browser](#in-the-browser)
 - [Reproduce](#reproduce) and [code layout](#code-layout)
 
 ## The dream and the actor
@@ -291,6 +292,29 @@ TWF_ENV=doomlite TWF_AGENT=doom_agent_roam_p0.1 cargo test --release   # golden 
 
 Keys over USB: Breakout a/d/s, Doom-lite w/a/d/space/s, Flappy space, Pac-Man w/a/s/d, Pong w/s. Then `g` hands back to the agent, `1`–`4` set the loop count, `l` toggles on-device learning and `r` restarts it.
 
+## In the browser
+
+The same `no_std` int8 engine also compiles to WebAssembly (`tinyworldformer-rs/web/`). The module has no imports and no wasm-bindgen. It runs the firmware's loop: dream, agent, and stream-x learning on the fly. A static page draws the frames on a canvas.
+
+```bash
+rustup target add wasm32-unknown-unknown    # once
+cd tinyworldformer-rs/web
+./build.sh                                   # one module per env into www/ (or ./build.sh pong flappy)
+python3 -m http.server -d www                # open http://localhost:8000, ?env=pacman picks a game
+```
+
+- **Same dream:** with the same seed, the wasm build dreams the same episodes as the native build, frame for frame.
+- **Speed:** 1–5 ms per dreamed frame, depending on the game.
+- **Agents:** each module carries its game's default agent; `TWF_AGENT=... ./build.sh <env>` picks another.
+- **Keys:** the same keys as on the Pico, plus arrow keys and on-screen buttons. `f` runs the dream as fast as it can, which is useful while learning (`l`).
+
+`www/` is a plain static site, so it can be hosted as is. To publish it as a Hugging Face Space (the free CPU tier is enough, since everything runs in the visitor's browser):
+
+```bash
+uvx --from huggingface_hub hf auth login     # once
+./deploy.sh <user>/tinyworldformer           # builds, creates the static Space if needed, uploads
+```
+
 ## Reproduce
 
 ```bash
@@ -325,3 +349,4 @@ Settings that differ per game:
 | `src/tinyworldformer/rustexport/` | reusable PyTorch → `no_std` Rust export: QAT layers, the int8 spec, conversion, code generation |
 | `tinyworldformer-rs/` | `no_std` int8 engine, dream loop, agent and learner; host demo (`src/main.rs`) |
 | `tinyworldformer-rs/firmware/` | Pico 2 W firmware |
+| `tinyworldformer-rs/web/` | WebAssembly build and the browser page (`www/`) |
