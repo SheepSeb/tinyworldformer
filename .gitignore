@@ -12,3 +12,5 @@ wheels/
 target/
 /models/
 /media/
+/video/
+.gstack/
