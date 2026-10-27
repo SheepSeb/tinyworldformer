@@ -1,16 +1,16 @@
-<p align="center"><img src="docs/media/banner.png" alt="tinyworldformer: games dreamed by a tiny int8 transformer on a Raspberry Pi Pico 2 W"></p>
+<p align="center"><img src="docs/media/banner.png" alt="tinyworldformer: games created by a tiny looped transformer on a Raspberry Pi Pico 2 W"></p>
 
-Two small neural networks share one Raspberry Pi Pico 2 W. The first one dreams a game: given the current frame and a button press, it predicts the next frame and the reward. The second one plays that game: it looks at each dreamed frame and picks a button. There is no game code on the chip. The five games (Breakout, Doom-lite, Flappy Bird, Pac-Man lite, Pong) only exist inside the first network.
+Using 2 small neural networks to generate and play the game at the same time on a Raspberry Pi Pico 2 W. The first one creates the game: given the current frame and the action, it predicts the next frame and the reward. The second one plays that game: it uses the generated frame and picks an action.
 
 | | | | |
 |---|---|---|---|
 | ![](docs/media/dream_breakout.gif) | ![](docs/media/dream_doomlite.gif) | ![](docs/media/dream_flappy.gif) | ![](docs/media/dream_pong.gif) |
 
-Every frame above was drawn by the dream network, and the buttons were pressed by the actor network.
+Every frame above was sampled by the world model network, and the actions were taken by the actor network.
 
 ## Why
 
-I got interested in looped transformers, where one transformer block is applied several times with the same weights instead of stacking different layers. Reusing weights is cheap on memory, so I wanted to see if a looped world model could be small enough to run on a microcontroller. I picked the Pico 2 W because it is cheap and has an FPU, and small games because I could write the real versions myself and check every dreamed frame against them. Later I added a streaming RL agent so the board could also learn to play inside its own dream.
+I got interested in looped transformers, where one transformer block is applied several times with the same weights instead of stacking different layers. Reusing weights is cheap on memory, so I wanted to see if a looped world model could be small enough to run on a microcontroller. I picked the Pico 2 W because it is cheap and has an FPU, and small games because I could write the real versions directly into numpy and check every generated frame against them. Later I added a streaming RL agent so the board could also learn to play inside its own dream.
 
 Contents: [the two networks](#the-dream-and-the-actor) · [the games](#the-games) · [the world model](#how-the-world-model-works) · [the agents](#the-agents-stream-x) · [quantization](#quantization-and-the-pico) · [on the chip](#on-the-chip) · [flashing](#flashing-a-game-and-an-agent) · [browser](#in-the-browser) · [reproduce](#reproduce) · [code layout](#code-layout)
 
@@ -18,17 +18,20 @@ Contents: [the two networks](#the-dream-and-the-actor) · [the games](#the-games
 
 ![the dream and the actor](docs/media/explain_twonetworks.gif)
 
-| | network 1: the dream | network 2: the actor |
+| | network 1: the world model | network 2: the actor |
 |---|---|---|
-| job | frame + button → next frame + reward | frame → button |
-| architecture | looped transformer, int8 | MLP with two hidden layers, float32 |
+| job | frame + action → next frame + reward | frame → action |
+| architecture | looped transformer, q int8 | MLP with two hidden layers, float32 |
 | size | 26k–131k parameters | 9k–16k parameters |
 | cost per frame | 2–8M multiply-adds | 9k–16k multiply-adds |
 | trained | on recorded real games ([how](#how-the-world-model-works)) | with stream-x, in the real game or inside the dream ([how](#the-agents-stream-x)) |
 
-On the chip neither network ever sees the real game: the actor only sees frames the dream drew, and the dream only sees buttons the actor pressed. Both run on core 1 of the RP2350, one after the other, every frame, while core 0 handles USB and the display.
+The size depends on the game, some games require more parameters to learn them to be playable, we tried to get to keep the number of the parameters small enough.
 
-The pretrained actor can be swapped for a fresh stream-x agent that learns from scratch while it plays inside the dream, on the board. And any button press hands control to you, so you can play the dream yourself.
+
+On the chip neither network ever uses the real game: the actor only sees frames the world model, and the world model only gets actions from the actor. Both run on core 1 of the RP2350, while core 0 handles USB and the display.
+
+The pretrained actor can be swapped for a fresh stream-x agent that learns from scratch on the board. And any button press hands control to you, so you can play the dream yourself.
 
 ## The games
 
@@ -48,17 +51,17 @@ You can play the real games in a terminal: `uv run python -m tinyworldformer.gam
 
 ## How the world model works
 
-### Frames become tokens
+### Frames split into tokens
 
 ![patches](docs/media/explain_patches.gif)
 
 The frame is cut into square patches: 2×2 cells in Breakout, 4×4 in Doom-lite, Flappy Bird and Pong, 6×6 in Pac-Man. That gives 36 to 80 tokens per game. A patch's embedding is the sum of one learned vector per cell, with a separate table for each position inside the patch so the cell order isn't lost. Every token also gets a position vector and the action's vector.
 
-### One block, looped
+### Looped Transformer
 
 ![loop](docs/media/explain_loop.gif)
 
-The model is a single transformer block (attention plus a ReLU MLP) with one set of weights, applied 1 to 4 times, with the input added back before every pass. The output after every pass is trained against the next frame, so at run time the loop count trades speed for accuracy. The Pico uses two loops.
+The model is a single transformer block (attention plus a ReLU MLP) with one set of weights, applied 1 to 4 times, with the input added back before every pass. The output after every pass is trained against the next frame, so at run time the loop count trades speed for accuracy. On the Pico to keep a decent frame rate we use uses two loops.
 
 The animation shows one held-out Doom-lite step. After one pass the model draws an enemy that isn't there, and each further pass removes part of it: 92, 35, 12, then 0 wrong cells. The bars on the right are the share of held-out frames each loop count gets exactly right.
 
@@ -82,12 +85,12 @@ Exact held-out frames by loop count:
 The model outputs a score for every cell and every token. Turning those scores into a frame turned out to matter almost as much as the model, and it ended up as three rules (shown above on Pong):
 
 1. Background cells (walls, bricks, pellets, floor) each take their most likely token independently.
-2. Singletons (the ball, the player, each ghost) are placed with one choice over all (cell, token) pairs, so there is always exactly one of each. After a random event the choice is sampled among candidates within 2.2 logits of the best, so the dream invents a new serve or respawn instead of averaging them.
-3. Pac-Man and the ghosts are 2×2 sprites, but only one cell of each carries state (the mouth holds the heading; the ghost's lower-left cell holds whether a pellet is underneath). The other three cells are stamped from it instead of predicted. This took Pac-Man from 14% to 65% exact frames without retraining.
+2. Singletons (the ball, the player, each ghost) are placed with one choice over all (cell, token) pairs, so there is always exactly one of each. After a random event the choice is sampled among candidates within 2.2 logits of the best, so the world model samples a new serve or respawn instead of averaging them.
+3. Pac-Man and the ghosts are 2×2 sprites, but only one cell of each carries state (the mouth holds the heading; the ghost's lower-left cell holds whether a pellet is underneath). The other three cells are stamped from it instead of predicted.
 
-Rule 2 came first. Decoding cell by cell, the first Breakout model drew two balls at once; one global choice took exact frames from 91.6% to 99.7%.
+We implemented Rule 2 because the first Breakout model drew two balls at once; one global choice took exact frames from 91.6% to 99.7%.
 
-### Checking the dream
+### Checking the world model
 
 Accuracy on recorded data wasn't enough. An agent drives the dream into states the data never had, and any mistake there is something it can exploit. So the main check runs while an agent plays: read the game state back off the dreamed frame (`games/<game>.py: read`), apply the real rules to that state and the agent's action, and compare the result with the next dreamed frame and reward.
 
@@ -103,29 +106,27 @@ Accuracy on recorded data wasn't enough. An agent drives the dream into states t
 | Pong | 1 | 0 | 0.00 |
 | Pac-Man | 742 | 38 | 0.39 |
 
-Pac-Man is the weakest dream: about one step in seven reads back to a state the real rules wouldn't produce, although the maze itself is never wrong and the frames stay readable.
-
 ### Training
 
 First, agents play the real game and every step is recorded as one example (frame, action, next frame, reward), 1–3 million per game. Some episodes start from unusual states, like bricks with holes or random positions, so the data covers more of the game.
 
 ![data](docs/media/explain_data.gif)
 
-Then the world model learns to predict the next frame with a per-cell cross-entropy loss: 30k steps, about 45 minutes per game on an RTX 4060 Ti. The first 3–4k steps run in float, then int8 rounding switches on ([QAT](#quantization-and-the-pico)). The animation shows one held-out Pong step predicted at six points of a short training run.
+Then the world model learns to predict the next frame with a per-cell cross-entropy loss: 30k steps, with the first 3–4k steps run in float, then int8 rounding switches on ([QAT](#quantization-and-the-pico)).
 
 ![training](docs/media/explain_training.gif)
 
-The int8 weights are written into Rust source with every float stored as its exact bits. `cargo test` checks that the Rust engine reproduces the Python integer spec bit for bit, and then the firmware runs the dream on the Pico.
+The int8 weights are written into Rust source with every float stored as its exact bits. We check them with `cargo test` to reproduces the Python integer spec bit for bit, and then the firmware runs on the Pico.
 
 ![deploy](docs/media/explain_deploy.gif)
 
-The last step closes the loop. An agent trained in the dream reaches states the recorded data never had, so I record real games with that agent and fine-tune the world model on everything.
+An agent trained in the world model reaches states the recorded data never had, so record real games with that agent and fine-tune the world model on everything.
 
-Most of what I know about this came from things going wrong, each costing a training round to find:
+The agent in different games stated exploiting them so those are some fixes to it:
 
-- Weighting the loss by "this cell changed" biased the model toward predicting change, so it drew two balls and broke two bricks. Weighting by where things *can* happen in the input frame, plus the global singleton choice, fixed it.
-- A Breakout agent in the dream got 154 points with 26 bricks left, because the dream paid for corner hits without removing the brick. Doom-lite agents learned to snipe from 5 cells away, which my scripted players never did. Both needed data collected with the learned agent.
-- Agents trained only in the dream scored 210 there (the real maximum is 56) and 28 in the real game, as *World Models* (Ha & Schmidhuber) predicts. Each collect-and-fine-tune round closed the exploit that agent had found. Breakout needed four rounds.
+- Weighting the loss by "this cell changed" biased the model toward predicting change, so it drew two balls and broke two bricks. Weighting by where things can happen in the input frame, plus the global singleton choice, fixed it.
+- A Breakout agent in the dream got 154 points with 26 bricks left, because the world model didn't remove bricks from the corner when it were hit. Doom-lite agents learned to snipe from 5 cells away.
+- Agents trained only in the dream scored 210 there (the real maximum is 56) and 28 in the real game, as *World Models* (Ha & Schmidhuber) predicts. Each collect-and-fine-tune round closed the exploit that agent had found.
 - The Doom-lite dream sometimes lost the enemy sprite and never drew it again: the model copied the previous view instead of redrawing it from the minimap. Noise augmentation fixed it (`train --noise 0.3`, as in GameNGen): input views get random pixels and sometimes lose the sprite.
 - `d=32` couldn't absorb the wider Breakout data and `d=48` could. Pac-Man's 48×48 frame needed `d=64`.
 
@@ -163,17 +164,6 @@ Greedy return in the real game, mean of 10 episodes, at snapshots of the same ru
 | Flappy Bird | −1.0 | −1.0 | −1.0 | 1.9 | 24.6 | 24.9 | 96.2 | 123.7 | 309.2 | 332 | 332 | 332 |
 | Pac-Man | 7.0 | 3.8 | 17.0 | 17.7 | 8.2 | 46.8 | 72.9 | 138.9 | 146.6 | 190.3 | 217.4 | 249 |
 | Pong | −4.3 | −3.9 | −3.9 | −3.9 | −1.7 | −2.0 | −0.3 | 1.1 | 1.7 | 1.1 | 1.1 | 5 |
-
-Scores are Breakout: bricks minus lost balls; Doom-lite: kills minus hits in 500 steps; Flappy Bird: pipes in 3,000 steps; Pac-Man: pellets minus lives lost; Pong: points won minus lost in 3,000 steps.
-
-Flappy Bird reaches the maximum by 250k steps. Breakout is still improving at 500k, and the 1M-step agents clear the board (56.0). Pong's agent learns not to miss and then plateaus: beating the CPU needs angled shots off the ends of the paddle, which it rarely finds.
-
-Some agents never saw the real game at all. Their scores, measured in the real game (greedy, 50 episodes):
-
-| game | agent | real-game score |
-|---|---|---|
-| Breakout | 1M dream steps, −5 per lost ball | 54.4 of 56 bricks |
-| Doom-lite | 300k dream steps, idle penalty 0.1 | 81.6 kills per 500 steps |
 
 Without shaping, Doom-lite agents camp in the start corner and fire, because the enemy always comes to them. `--idle-penalty 0.1` costs 0.1 for each step spent in a cell visited more than 6 times in the last 20 steps. The position is read off the minimap, so the penalty works inside the dream too. With it the agent patrols and gets twice the kills.
 
@@ -224,7 +214,7 @@ Where the memory goes:
 | on-device learner | code only | weights, eligibility traces and normalization for two 32-unit networks (49 KB for Pac-Man up to 106 KB for Doom-lite; it scales with the number of input features) |
 | firmware | code, USB, display driver (about 150 KB) | stacks (16 KB for core 1), USB buffers, frame channels |
 
-Every game fits in the 4 MB of flash and 512 KiB of RAM. Breakout uses 361 KB of flash and 299 KB of RAM; Pac-Man, the largest, uses 600 KB and 460 KB.
+Every game fits in the 4 MB of flash and 512 KiB of SRAM. Breakout uses 361 KB of flash and 299 KB of SRAM; Pac-Man, the largest, uses 600 KB and 460 KB.
 
 Most of the time goes into int8 dot products (`dot_i8` in `src/lib.rs`). One 32-bit load fetches 4 weights, `SXTB16` unpacks bytes 0/2 and 1/3 into 16-bit halves, and `SMLAD` does two multiply-adds in one instruction. Attention multiplies uint8 probabilities by int8 values, so it uses `UXTB16` instead. Norms, the exp table lookup and the final per-output scale stay in float32 on the FPU. A frame at 2 loops is 2–4M multiply-adds (8.2M for Pac-Man); on a desktop CPU the same Rust code dreams a frame in 0.7 ms (Flappy Bird) to 1.5 ms (Breakout). I haven't measured the frame rate on the Pico itself yet.
 
@@ -260,13 +250,6 @@ python3 -m http.server -d www                # open http://localhost:8000, ?env=
 ```
 
 With the same seed, the wasm build dreams the same episodes as the native build, frame for frame, at 1–5 ms per frame depending on the game. Each module carries its game's default agent; `TWF_AGENT=... ./build.sh <env>` picks another. The keys are the same as on the Pico, plus arrow keys and on-screen buttons, and `f` runs the dream as fast as it can, which helps while learning (`l`).
-
-`www/` is a plain static site, so it can be hosted as is. To publish it as a Hugging Face Space (the free CPU tier is enough, since everything runs in the visitor's browser):
-
-```bash
-uvx --from huggingface_hub hf auth login     # once
-./deploy.sh <user>/tinyworldformer           # builds, creates the static Space if needed, uploads
-```
 
 ## Reproduce
 
