@@ -12,11 +12,11 @@ Every frame above was sampled by the world model network, and the actions were t
 
 I got interested in looped transformers, where one transformer block is applied several times with the same weights instead of stacking different layers. Reusing weights is cheap on memory, so I wanted to see if a looped world model could be small enough to run on a microcontroller. I picked the Pico 2 W because it is cheap and has an FPU, and small games because I could write the real versions directly into numpy and check every generated frame against them. Later I added a streaming RL agent so the board could also learn to play inside its own dream.
 
-Contents: [the two networks](#the-dream-and-the-actor) · [the games](#the-games) · [the world model](#how-the-world-model-works) · [the agents](#the-agents-stream-x) · [quantization](#quantization-and-the-pico) · [on the chip](#on-the-chip) · [flashing](#flashing-a-game-and-an-agent) · [browser](#in-the-browser) · [reproduce](#reproduce) · [code layout](#code-layout)
+Contents: [the two networks](#the-world-model-and-the-actor) · [the games](#the-games) · [the world model](#how-the-world-model-works) · [the agents](#the-agents-stream-x) · [quantization](#quantization-and-the-pico) · [on the chip](#on-the-chip) · [flashing](#flashing-a-game-and-an-agent) · [browser](#in-the-browser) · [reproduce](#reproduce) · [code layout](#code-layout)
 
-## The dream and the actor
+## The world model and the actor
 
-![the dream and the actor](docs/media/explain_twonetworks.gif)
+![the world model and the actor](docs/media/explain_twonetworks.gif)
 
 | | network 1: the world model | network 2: the actor |
 |---|---|---|
